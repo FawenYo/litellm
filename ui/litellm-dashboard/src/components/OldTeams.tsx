@@ -1,6 +1,6 @@
 import { useOrganizations } from "@/app/(dashboard)/hooks/organizations/useOrganizations";
 import AvailableTeamsPanel from "@/components/team/available_teams";
-import TeamInfoView from "@/components/team/team_info";
+import TeamInfoView from "@/components/team/TeamInfo";
 import TeamSSOSettings from "@/components/TeamSSOSettings";
 import { isProxyAdminRole } from "@/utils/roles";
 import { InfoCircleOutlined } from "@ant-design/icons";
@@ -1018,7 +1018,7 @@ const Teams: React.FC<TeamProps> = ({
           {canCreateOrManageTeams(userRole, userID, organizations) && (
             <Modal
               title="Create Team"
-              visible={isTeamModalVisible}
+              open={isTeamModalVisible}
               width={1000}
               footer={null}
               onOk={handleOk}

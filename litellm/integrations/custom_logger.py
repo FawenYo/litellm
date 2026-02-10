@@ -371,6 +371,28 @@ class CustomLogger:  # https://docs.litellm.ai/docs/observability/custom_callbac
     ]:  # raise exception if invalid, return a str for the user to receive - if rejected, or return a modified dictionary for passing into litellm
         pass
 
+    async def async_post_call_response_headers_hook(
+        self,
+        data: dict,
+        user_api_key_dict: UserAPIKeyAuth,
+        response: Any,
+        request_headers: Optional[Dict[str, str]] = None,
+    ) -> Optional[Dict[str, str]]:
+        """
+        Called after an LLM API call (success or failure) to allow injecting custom HTTP response headers.
+
+        Args:
+            - data: dict - The request data.
+            - user_api_key_dict: UserAPIKeyAuth - The user API key dictionary.
+            - response: Any - The response object (None for failure cases).
+            - request_headers: Optional[Dict[str, str]] - The original request headers.
+
+        Returns:
+            - Optional[Dict[str, str]]: A dictionary of headers to inject into the HTTP response.
+                                        Return None to not inject any headers.
+        """
+        return None
+
     async def async_post_call_failure_hook(
         self,
         request_data: dict,
@@ -640,6 +662,37 @@ class CustomLogger:  # https://docs.litellm.ai/docs/observability/custom_callbac
             )
 
             return final_response
+        """
+        pass
+    
+    async def async_should_run_chat_completion_agentic_loop(
+        self,
+        response: Any,
+        model: str,
+        messages: List[Dict],
+        tools: Optional[List[Dict]],
+        stream: bool,
+        custom_llm_provider: str,
+        kwargs: Dict,
+    ) -> Tuple[bool, Dict]:
+        """
+        Hook to determine if chat completion agentic loop should be executed.
+        """
+        return False, {}
+
+    async def async_run_chat_completion_agentic_loop(
+        self,
+        tools: Dict,
+        model: str,
+        messages: List[Dict],
+        response: Any,
+        optional_params: Dict,
+        logging_obj: "LiteLLMLoggingObj",
+        stream: bool,
+        kwargs: Dict,
+    ) -> Any:
+        """
+        Hook to execute chat completion agentic loop based on context from should_run hook.
         """
         pass
 
