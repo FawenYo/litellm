@@ -6,7 +6,17 @@ import logging
 import threading
 import time
 import traceback
-from typing import Any, Callable, Dict, List, Optional, Union, cast
+from typing import (
+    Any,
+    AsyncIterator,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Optional,
+    Union,
+    cast,
+)
 
 import anyio
 import httpx
@@ -86,6 +96,7 @@ class CustomStreamWrapper:
         self.completion_stream = completion_stream
         self.sent_first_chunk = False
         self.sent_last_chunk = False
+        self._stream_created_time: float = time.time()
 
         litellm_params: GenericLiteLLMParams = GenericLiteLLMParams(
             **self.logging_obj.model_call_details.get("litellm_params", {})
@@ -151,10 +162,24 @@ class CustomStreamWrapper:
         self.is_function_call = self.check_is_function_call(logging_obj=logging_obj)
         self.created: Optional[int] = None
 
-    def __iter__(self):
+    def _check_max_streaming_duration(self) -> None:
+        """Raise litellm.Timeout if the stream has exceeded LITELLM_MAX_STREAMING_DURATION_SECONDS."""
+        from litellm.constants import LITELLM_MAX_STREAMING_DURATION_SECONDS
+
+        if LITELLM_MAX_STREAMING_DURATION_SECONDS is None:
+            return
+        elapsed = time.time() - self._stream_created_time
+        if elapsed > LITELLM_MAX_STREAMING_DURATION_SECONDS:
+            raise litellm.Timeout(
+                message=f"Stream exceeded max streaming duration of {LITELLM_MAX_STREAMING_DURATION_SECONDS}s (elapsed {elapsed:.1f}s)",
+                model=self.model or "",
+                llm_provider=self.custom_llm_provider or "",
+            )
+
+    def __iter__(self) -> Iterator["ModelResponseStream"]:
         return self
 
-    def __aiter__(self):
+    def __aiter__(self) -> AsyncIterator["ModelResponseStream"]:
         return self
 
     async def aclose(self):
@@ -1226,27 +1251,27 @@ class CustomStreamWrapper:
                 else:
                     completion_obj["content"] = str(chunk)
             elif self.custom_llm_provider == "petals":
-                if len(self.completion_stream) == 0:
+                if self.completion_stream is None or len(self.completion_stream) == 0:
                     if self.received_finish_reason is not None:
                         raise StopIteration
                     else:
                         self.received_finish_reason = "stop"
                 chunk_size = 30
-                new_chunk = self.completion_stream[:chunk_size]
+                new_chunk = self.completion_stream[:chunk_size]  # type: ignore[index]
                 completion_obj["content"] = new_chunk
-                self.completion_stream = self.completion_stream[chunk_size:]
+                self.completion_stream = self.completion_stream[chunk_size:]  # type: ignore[index]
             elif self.custom_llm_provider == "palm":
                 # fake streaming
                 response_obj = {}
-                if len(self.completion_stream) == 0:
+                if self.completion_stream is None or len(self.completion_stream) == 0:
                     if self.received_finish_reason is not None:
                         raise StopIteration
                     else:
                         self.received_finish_reason = "stop"
                 chunk_size = 30
-                new_chunk = self.completion_stream[:chunk_size]
+                new_chunk = self.completion_stream[:chunk_size]  # type: ignore[index]
                 completion_obj["content"] = new_chunk
-                self.completion_stream = self.completion_stream[chunk_size:]
+                self.completion_stream = self.completion_stream[chunk_size:]  # type: ignore[index]
             elif self.custom_llm_provider == "triton":
                 response_obj = self.handle_triton_stream(chunk)
                 completion_obj["content"] = response_obj["text"]
@@ -1726,13 +1751,14 @@ class CustomStreamWrapper:
             model_response.choices[0].finish_reason = "tool_calls"
         return model_response
 
-    def __next__(self):  # noqa: PLR0915
+    def __next__(self) -> "ModelResponseStream":  # noqa: PLR0915
         cache_hit = False
         if (
             self.custom_llm_provider is not None
             and self.custom_llm_provider == "cached_response"
         ):
             cache_hit = True
+        self._check_max_streaming_duration()
         try:
             if self.completion_stream is None:
                 self.fetch_sync_stream()
@@ -1745,10 +1771,10 @@ class CustomStreamWrapper:
                 ):
                     chunk = self.completion_stream
                 else:
-                    chunk = next(self.completion_stream)
+                    chunk = next(self.completion_stream)  # type: ignore[arg-type]
                 if chunk is not None and chunk != b"":
                     print_verbose(
-                        f"PROCESSED CHUNK PRE CHUNK CREATOR: {chunk}; custom_llm_provider: {self.custom_llm_provider}"
+                        f"PROCESSED CHUNK PRE CHUNK CREATOR: {chunk.decode('utf-8', errors='replace') if isinstance(chunk, bytes) else chunk}; custom_llm_provider: {self.custom_llm_provider}"
                     )
                     response: Optional[ModelResponseStream] = self.chunk_creator(
                         chunk=chunk
@@ -1900,19 +1926,20 @@ class CustomStreamWrapper:
 
         return self.completion_stream
 
-    async def __anext__(self):  # noqa: PLR0915
+    async def __anext__(self) -> "ModelResponseStream":  # noqa: PLR0915
         cache_hit = False
         if (
             self.custom_llm_provider is not None
             and self.custom_llm_provider == "cached_response"
         ):
             cache_hit = True
+        self._check_max_streaming_duration()
         try:
             if self.completion_stream is None:
                 await self.fetch_stream()
 
             if is_async_iterable(self.completion_stream):
-                async for chunk in self.completion_stream:
+                async for chunk in self.completion_stream:  # type: ignore[union-attr]
                     if chunk == "None" or chunk is None:
                         continue  # skip None chunks
 
@@ -1994,11 +2021,9 @@ class CustomStreamWrapper:
                     ):
                         chunk = self.completion_stream
                     else:
-                        chunk = next(self.completion_stream)
+                        chunk = next(self.completion_stream)  # type: ignore[arg-type]
                     if chunk is not None and chunk != b"":
-                        processed_chunk: Optional[
-                            ModelResponseStream
-                        ] = self.chunk_creator(chunk=chunk)
+                        processed_chunk = self.chunk_creator(chunk=chunk)
                         if processed_chunk is None:
                             continue
 
