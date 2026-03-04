@@ -77,6 +77,7 @@ class SupportedDBObjectType(str, enum.Enum):
     PASS_THROUGH_ENDPOINTS = "pass_through_endpoints"
     PROMPTS = "prompts"
     MODEL_COST_MAP = "model_cost_map"
+    TOOLS = "tools"
 
     def __str__(self):
         return str(self.value)
@@ -383,6 +384,7 @@ class LiteLLMRoutes(enum.Enum):
         "/vertex-ai",
         "/vertex_ai",
         "/cohere",
+        "/cursor",
         "/gemini",
         "/anthropic",
         "/langfuse",
@@ -431,6 +433,7 @@ class LiteLLMRoutes(enum.Enum):
 
     agent_routes = [
         "/v1/agents",
+        "/v1/agents/{agent_id}",
         "/agents",
         "/a2a/{agent_id}",
         "/a2a/{agent_id}/message/send",
@@ -510,6 +513,7 @@ class LiteLLMRoutes(enum.Enum):
         KeyManagementRoutes.KEY_UNBLOCK.value,
         KeyManagementRoutes.KEY_BULK_UPDATE.value,
         KeyManagementRoutes.TEAM_DAILY_ACTIVITY.value,
+        KeyManagementRoutes.KEY_RESET_SPEND.value,
     ]
 
     management_routes = [
@@ -644,6 +648,8 @@ class LiteLLMRoutes(enum.Enum):
         # Invitation routes - org/team admins checked in endpoint via _user_has_admin_privileges
         "/invitation/new",
         "/invitation/delete",
+        # Team guardrail submission - requires team-scoped key; endpoint enforces team_id
+        "/guardrails/register",
     ]  # routes that manage their own allowed/disallowed logic
 
     ## Org Admin Routes ##
@@ -1092,7 +1098,7 @@ class NewMCPServerRequest(LiteLLMPydanticObjectBase):
     token_url: Optional[str] = None
     registration_url: Optional[str] = None
     allow_all_keys: bool = False
-    available_on_public_internet: bool = False
+    available_on_public_internet: bool = True
 
     @model_validator(mode="before")
     @classmethod
@@ -1146,7 +1152,7 @@ class UpdateMCPServerRequest(LiteLLMPydanticObjectBase):
     token_url: Optional[str] = None
     registration_url: Optional[str] = None
     allow_all_keys: bool = False
-    available_on_public_internet: bool = False
+    available_on_public_internet: bool = True
 
     @model_validator(mode="before")
     @classmethod
@@ -1203,7 +1209,7 @@ class LiteLLM_MCPServerTable(LiteLLMPydanticObjectBase):
     token_url: Optional[str] = None
     registration_url: Optional[str] = None
     allow_all_keys: bool = False
-    available_on_public_internet: bool = False
+    available_on_public_internet: bool = True
 
 
 class MakeMCPServersPublicRequest(LiteLLMPydanticObjectBase):
@@ -1547,6 +1553,8 @@ class NewTeamRequest(TeamBase):
     ] = None  # allow user to set TPM limit for all team members
     team_member_key_duration: Optional[str] = None  # e.g. "1d", "1w", "1m"
     allowed_vector_store_indexes: Optional[List[AllowedVectorStoreIndexItem]] = None
+    enforced_batch_output_expires_after: Optional[dict] = None
+    enforced_file_expires_after: Optional[dict] = None
 
     model_config = ConfigDict(protected_namespaces=())
 
@@ -1602,6 +1610,8 @@ class UpdateTeamRequest(LiteLLMPydanticObjectBase):
     model_rpm_limit: Optional[Dict[str, int]] = None
     model_tpm_limit: Optional[Dict[str, int]] = None
     allowed_vector_store_indexes: Optional[List[AllowedVectorStoreIndexItem]] = None
+    enforced_batch_output_expires_after: Optional[dict] = None
+    enforced_file_expires_after: Optional[dict] = None
     router_settings: Optional[dict] = None
     access_group_ids: Optional[List[str]] = None
 
@@ -2124,7 +2134,7 @@ class ConfigGeneralSettings(LiteLLMPydanticObjectBase):
     user_header_mappings: Optional[List[UserHeaderMapping]] = None
     supported_db_objects: Optional[List[SupportedDBObjectType]] = Field(
         None,
-        description="Fine-grained control over which object types to load from the database when store_model_in_db is True. Available types: 'models', 'mcp', 'guardrails', 'vector_stores', 'pass_through_endpoints', 'prompts', 'model_cost_map'. If not set, all objects are loaded (default behavior).",
+        description="Fine-grained control over which object types to load from the database when store_model_in_db is True. Available types: 'models', 'mcp', 'guardrails', 'vector_stores', 'pass_through_endpoints', 'prompts', 'model_cost_map', 'tools'. If not set, all objects are loaded (default behavior).",
     )
     user_mcp_management_mode: Optional[UserMCPManagementMode] = Field(
         None,
@@ -2280,6 +2290,9 @@ class LiteLLM_VerificationTokenView(LiteLLM_VerificationToken):
     organization_rpm_limit: Optional[int] = None
     organization_metadata: Optional[dict] = None
 
+    # Project Params
+    project_metadata: Optional[dict] = None
+
     # Time stamps
     last_refreshed_at: Optional[float] = None  # last time joint view was pulled from db
 
@@ -2413,6 +2426,7 @@ class UserAPIKeyAuth(
             key_alias=LITELLM_INTERNAL_JOBS_SERVICE_ACCOUNT_NAME,
             team_alias="system",
             user_id="system",
+            user_role=LitellmUserRoles.PROXY_ADMIN,
         )
 
 
@@ -2581,6 +2595,7 @@ class NewProjectRequest(LiteLLM_BudgetTable):
     team_id: str
     budget_id: Optional[str] = None
     metadata: Optional[dict] = None
+    tags: Optional[List[str]] = None
     models: List[str] = []
     model_rpm_limit: Optional[dict] = None
     model_tpm_limit: Optional[dict] = None
@@ -2590,6 +2605,11 @@ class NewProjectRequest(LiteLLM_BudgetTable):
     @model_validator(mode="before")
     @classmethod
     def set_model_info(cls, values):
+        if "tags" in values and values["tags"] is not None:
+            if not isinstance(values["tags"], list):
+                raise ValueError(
+                    f"tags must be a list of strings, got {type(values['tags']).__name__}"
+                )
         for field in LiteLLM_ManagementEndpoint_MetadataFields:
             if values.get(field) is not None:
                 if values.get("metadata") is None:
@@ -2607,6 +2627,7 @@ class UpdateProjectRequest(LiteLLM_BudgetTable):
     description: Optional[str] = None
     team_id: Optional[str] = None
     metadata: Optional[dict] = None
+    tags: Optional[List[str]] = None
     models: Optional[List[str]] = None
     model_rpm_limit: Optional[dict] = None
     model_tpm_limit: Optional[dict] = None
@@ -2617,6 +2638,11 @@ class UpdateProjectRequest(LiteLLM_BudgetTable):
     @model_validator(mode="before")
     @classmethod
     def set_model_info(cls, values):
+        if "tags" in values and values["tags"] is not None:
+            if not isinstance(values["tags"], list):
+                raise ValueError(
+                    f"tags must be a list of strings, got {type(values['tags']).__name__}"
+                )
         for field in LiteLLM_ManagementEndpoint_MetadataFields:
             if values.get(field) is not None:
                 if values.get("metadata") is None:
@@ -2650,6 +2676,8 @@ class LiteLLM_ProjectTable(LiteLLMPydanticObjectBase):
     object_permission_id: Optional[str] = None
     created_by: str
     updated_by: str
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
     litellm_budget_table: Optional[LiteLLM_BudgetTable] = None
     object_permission: Optional[LiteLLM_ObjectPermissionTable] = None
 
@@ -2841,6 +2869,9 @@ class TokenCountRequest(LiteLLMPydanticObjectBase):
     """
     Google /countTokens endpoint expects contents to be a list of dicts with the following structure:
     """
+
+    tools: Optional[List[dict]] = None
+    system: Optional[Any] = None
 
 
 class CallInfo(LiteLLMPydanticObjectBase):
@@ -3347,6 +3378,11 @@ class ProxyErrorTypes(str, enum.Enum):
     Team member is already in team
     """
 
+    tool_access_denied = "tool_access_denied"
+    """
+    Tool is not in the allowed tools list for this key/team
+    """
+
     @classmethod
     def get_model_access_error_type_for_object(
         cls, object_type: Literal["key", "user", "team", "org", "project"]
@@ -3758,6 +3794,8 @@ LiteLLM_ManagementEndpoint_MetadataFields = [
     "temp_budget_increase",
     "temp_budget_expiry",
     "allowed_vector_store_indexes",
+    "enforced_batch_output_expires_after",
+    "enforced_file_expires_after",
 ]
 
 LiteLLM_ManagementEndpoint_MetadataFields_Premium = [
@@ -4129,6 +4167,7 @@ class ToolDiscoveryQueueItem(TypedDict, total=False):
     key_hash: Optional[str]  # hash of virtual key that triggered discovery
     team_id: Optional[str]  # team that triggered discovery
     key_alias: Optional[str]  # human-readable key alias
+    user_agent: Optional[str]  # HTTP User-Agent of the caller
 
 
 class LiteLLM_ManagedFileTable(LiteLLMPydanticObjectBase):
