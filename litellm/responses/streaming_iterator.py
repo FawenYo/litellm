@@ -3,7 +3,7 @@ import json
 import time
 import traceback
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 
@@ -26,6 +26,7 @@ from litellm.types.llms.openai import (
     OutputTextDeltaEvent,
     ResponseAPIUsage,
     ResponseCompletedEvent,
+    ResponsesAPIRequestParams,
     ResponsesAPIResponse,
     ResponsesAPIStreamEvents,
     ResponsesAPIStreamingResponse,
@@ -82,6 +83,7 @@ class BaseResponsesAPIStreamingIterator:
         self._hidden_params = {
             "model_id": _model_info.get("id", None),
             "api_base": _api_base,
+            "custom_llm_provider": custom_llm_provider,
         }
         self._hidden_params["additional_headers"] = process_response_headers(
             self.response.headers or {}
@@ -131,19 +133,16 @@ class BaseResponsesAPIStreamingIterator:
                 # if "response" in parsed_chunk, then encode litellm specific information like custom_llm_provider
                 response_object = getattr(openai_responses_api_chunk, "response", None)
                 if response_object:
-                    response = (
-                        ResponsesAPIRequestUtils._update_responses_api_response_id_with_model_id(
-                            responses_api_response=response_object,
-                            litellm_metadata=self.litellm_metadata,
-                            custom_llm_provider=self.custom_llm_provider,
-                        )
+                    response = ResponsesAPIRequestUtils._update_responses_api_response_id_with_model_id(
+                        responses_api_response=response_object,
+                        litellm_metadata=self.litellm_metadata,
+                        custom_llm_provider=self.custom_llm_provider,
                     )
                     setattr(openai_responses_api_chunk, "response", response)
 
                 # Wrap encrypted_content in streaming events (output_item.added, output_item.done)
-                if (
-                    self.litellm_metadata
-                    and self.litellm_metadata.get("encrypted_content_affinity_enabled")
+                if self.litellm_metadata and self.litellm_metadata.get(
+                    "encrypted_content_affinity_enabled"
                 ):
                     event_type = getattr(openai_responses_api_chunk, "type", None)
                     if event_type in (
@@ -155,7 +154,9 @@ class BaseResponsesAPIStreamingIterator:
                             encrypted_content = getattr(item, "encrypted_content", None)
                             if encrypted_content and isinstance(encrypted_content, str):
                                 model_id = (
-                                    self.litellm_metadata.get("model_info", {}).get("id")
+                                    self.litellm_metadata.get("model_info", {}).get(
+                                        "id"
+                                    )
                                     if self.litellm_metadata
                                     else None
                                 )
@@ -165,11 +166,12 @@ class BaseResponsesAPIStreamingIterator:
                                     )
                                     setattr(item, "encrypted_content", wrapped_content)
 
-                # Store the completed response
-                if (
-                    openai_responses_api_chunk
-                    and getattr(openai_responses_api_chunk, "type", None)
-                    == ResponsesAPIStreamEvents.RESPONSE_COMPLETED
+                # Store the completed response (also for incomplete/failed so logging still fires)
+                _chunk_type = getattr(openai_responses_api_chunk, "type", None)
+                if openai_responses_api_chunk and _chunk_type in (
+                    ResponsesAPIStreamEvents.RESPONSE_COMPLETED,
+                    ResponsesAPIStreamEvents.RESPONSE_INCOMPLETE,
+                    ResponsesAPIStreamEvents.RESPONSE_FAILED,
                 ):
                     self.completed_response = openai_responses_api_chunk
                     # Add cost to usage object if include_cost_in_streaming_usage is True
@@ -186,18 +188,20 @@ class BaseResponsesAPIStreamingIterator:
                             )
                             if usage_obj is not None:
                                 try:
-                                    cost: Optional[float] = (
-                                        self.logging_obj._response_cost_calculator(
-                                            result=response_obj
-                                        )
+                                    cost: Optional[
+                                        float
+                                    ] = self.logging_obj._response_cost_calculator(
+                                        result=response_obj
                                     )
                                     if cost is not None:
                                         setattr(usage_obj, "cost", cost)
                                 except Exception:
-                                    # If cost calculation fails, continue without cost
                                     pass
 
-                    self._handle_logging_completed_response()
+                    if _chunk_type == ResponsesAPIStreamEvents.RESPONSE_FAILED:
+                        self._handle_logging_failed_response()
+                    else:
+                        self._handle_logging_completed_response()
 
                 return openai_responses_api_chunk
 
@@ -215,6 +219,32 @@ class BaseResponsesAPIStreamingIterator:
         """Base implementation - should be overridden by subclasses"""
         pass
 
+    def _handle_logging_failed_response(self):
+        """
+        Handle logging for RESPONSE_FAILED events by routing to failure handlers.
+
+        Unlike _handle_logging_completed_response (which calls success handlers),
+        this constructs an exception from the response error and routes to
+        async_failure_handler / failure_handler so logging integrations correctly
+        record the call as failed.
+        """
+        response_obj = (
+            getattr(self.completed_response, "response", None)
+            if self.completed_response
+            else None
+        )
+        error_info = getattr(response_obj, "error", None) if response_obj else None
+        error_message = "Response failed"
+        if isinstance(error_info, dict):
+            error_message = error_info.get("message", str(error_info))
+        exception = litellm.APIError(
+            status_code=500,
+            message=error_message,
+            llm_provider=self.custom_llm_provider or "",
+            model=self.model or "",
+        )
+        self._handle_failure(exception)
+
     async def _call_post_streaming_deployment_hook(self, chunk):
         """
         Allow callbacks to modify streaming chunks before returning (parity with chat).
@@ -229,7 +259,9 @@ class BaseResponsesAPIStreamingIterator:
                     typed_call_type = None
             if typed_call_type is None:
                 try:
-                    typed_call_type = CallTypes(getattr(self.logging_obj, "call_type", None))
+                    typed_call_type = CallTypes(
+                        getattr(self.logging_obj, "call_type", None)
+                    )
                 except Exception:
                     typed_call_type = None
 
@@ -331,7 +363,7 @@ class BaseResponsesAPIStreamingIterator:
         if self._failure_handled:
             return
         self._failure_handled = True
-        
+
         traceback_exception = traceback.format_exc()
         try:
             run_async_function(
@@ -443,7 +475,9 @@ class ResponsesAPIStreamingIterator(BaseResponsesAPIStreamingIterator):
         # Use model_dump + model_validate instead of deepcopy to avoid pickle errors with
         # Pydantic ValidatorIterator when response contains tool_choice with allowed_tools (fixes #17192)
         logging_response = self.completed_response
-        if self.completed_response is not None and hasattr(self.completed_response, 'model_dump'):
+        if self.completed_response is not None and hasattr(
+            self.completed_response, "model_dump"
+        ):
             try:
                 logging_response = type(self.completed_response).model_validate(
                     self.completed_response.model_dump()
@@ -548,7 +582,9 @@ class SyncResponsesAPIStreamingIterator(BaseResponsesAPIStreamingIterator):
         # Use model_dump + model_validate instead of deepcopy to avoid pickle errors with
         # Pydantic ValidatorIterator when response contains tool_choice with allowed_tools (fixes #17192)
         logging_response = self.completed_response
-        if self.completed_response is not None and hasattr(self.completed_response, 'model_dump'):
+        if self.completed_response is not None and hasattr(
+            self.completed_response, "model_dump"
+        ):
             try:
                 logging_response = type(self.completed_response).model_validate(
                     self.completed_response.model_dump()
@@ -631,9 +667,7 @@ class MockResponsesAPIStreamingIterator(BaseResponsesAPIStreamingIterator):
 
         # Add cost to usage object if include_cost_in_streaming_usage is True
         if litellm.include_cost_in_streaming_usage and logging_obj is not None:
-            usage_obj: Optional[ResponseAPIUsage] = getattr(
-                transformed, "usage", None
-            )
+            usage_obj: Optional[ResponseAPIUsage] = getattr(transformed, "usage", None)
             if usage_obj is not None:
                 try:
                     cost: Optional[float] = logging_obj._response_cost_calculator(
@@ -687,9 +721,6 @@ class MockResponsesAPIStreamingIterator(BaseResponsesAPIStreamingIterator):
 # ---------------------------------------------------------------------------
 # WebSocket mode streaming (bidirectional forwarding)
 # ---------------------------------------------------------------------------
-
-if TYPE_CHECKING:
-    from websockets.asyncio.client import ClientConnection as _WsClientConnection
 
 from litellm._logging import verbose_logger
 from litellm.litellm_core_utils.thread_pool_executor import executor as _ws_executor
@@ -802,9 +833,7 @@ class ResponsesWebSocketStreaming:
         if self.input_messages:
             self.logging_obj.model_call_details["messages"] = self.input_messages
         if self.messages:
-            asyncio.create_task(
-                self.logging_obj.async_success_handler(self.messages)
-            )
+            asyncio.create_task(self.logging_obj.async_success_handler(self.messages))
             _ws_executor.submit(self.logging_obj.success_handler, self.messages)
 
     async def backend_to_client(self) -> None:
@@ -827,13 +856,9 @@ class ResponsesWebSocketStreaming:
                 await self.websocket.send_text(response_str)
 
         except websockets.exceptions.ConnectionClosed as e:  # type: ignore
-            verbose_logger.debug(
-                "Responses WS backend connection closed: %s", e
-            )
+            verbose_logger.debug("Responses WS backend connection closed: %s", e)
         except Exception as e:
-            verbose_logger.exception(
-                "Error in responses WS backend_to_client: %s", e
-            )
+            verbose_logger.exception("Error in responses WS backend_to_client: %s", e)
         finally:
             await self._log_messages()
 
@@ -874,31 +899,12 @@ class ResponsesWebSocketStreaming:
 # Managed WebSocket mode (HTTP-backed, provider-agnostic)
 # ---------------------------------------------------------------------------
 
-_RESPONSE_CREATE_PARAMS = (
-    "input",
-    "model",
-    "previous_response_id",
-    "instructions",
-    "max_output_tokens",
-    "tools",
-    "tool_choice",
-    "temperature",
-    "top_p",
-    "store",
-    "metadata",
-    "truncation",
-    "reasoning",
-    "stream",
-    "include",
-    "parallel_tool_calls",
-    "text",
-    "user",
-    "service_tier",
-    "safety_identifier",
-    "background",
+_RESPONSE_CREATE_PARAMS: frozenset = (
+    ResponsesAPIRequestParams.__required_keys__
+    | ResponsesAPIRequestParams.__optional_keys__
 )
 
-_MANAGED_WS_SKIP_KWARGS = frozenset(
+_MANAGED_WS_SKIP_KWARGS: frozenset = frozenset(
     {
         "litellm_logging_obj",
         "litellm_call_id",
@@ -952,7 +958,7 @@ class ManagedResponsesWebSocketHandler:
         self.extra_kwargs: Dict[str, Any] = {
             k: v for k, v in kwargs.items() if k not in _MANAGED_WS_SKIP_KWARGS
         }
-        # In-memory session history: response_id → list of input+output messages.
+        # In-memory session history: response_id → full accumulated message list.
         # Keyed by the DECODED (pre-encoding) response ID from response.completed.
         # This avoids the async DB-write race condition where spend logs haven't
         # been committed yet when the next response.create arrives.
@@ -974,52 +980,42 @@ class ManagedResponsesWebSocketHandler:
                 return json.dumps(chunk, default=str)
             return json.dumps(str(chunk))
         except Exception as exc:
-            verbose_logger.debug("ManagedResponsesWS: failed to serialize chunk: %s", exc)
+            verbose_logger.debug(
+                "ManagedResponsesWS: failed to serialize chunk: %s", exc
+            )
             return None
 
     async def _send_error(self, message: str, error_type: str = "server_error") -> None:
         try:
             await self.websocket.send_text(
-                json.dumps({"type": "error", "error": {"type": error_type, "message": message}})
+                json.dumps(
+                    {"type": "error", "error": {"type": error_type, "message": message}}
+                )
             )
         except Exception:
             pass
-
-    # ------------------------------------------------------------------
-    # Core request handler
-    # ------------------------------------------------------------------
 
     def _get_history_messages(self, previous_response_id: str) -> List[Dict[str, Any]]:
         """
         Return accumulated message history for *previous_response_id*.
 
-        Checks the in-memory session store first (fast path, no DB round-trip).
         The key is the *decoded* response ID (the raw provider response ID before
         LiteLLM base64-encodes it into the ``resp_...`` format).
         """
-        from litellm.responses.utils import ResponsesAPIRequestUtils
-
         decoded = ResponsesAPIRequestUtils._decode_responses_api_response_id(
             previous_response_id
         )
         raw_id = decoded.get("response_id", previous_response_id)
         return list(self._session_history.get(raw_id, []))
 
-    def _store_history(
-        self,
-        response_id: str,
-        input_messages: List[Dict[str, Any]],
-        output_messages: List[Dict[str, Any]],
-    ) -> None:
+    def _store_history(self, response_id: str, messages: List[Dict[str, Any]]) -> None:
         """
-        Persist a turn's messages in the in-memory session store.
+        Store the complete accumulated message history for *response_id*.
 
-        *response_id* is the raw (decoded) provider ID extracted from the
-        ``response.completed`` event so that the next turn can look it up via
-        :meth:`_get_history_messages`.
+        Replaces any prior value — callers are responsible for passing the full
+        history (prior turns + current input + new output).
         """
-        prior: List[Dict[str, Any]] = self._session_history.get(response_id, [])
-        self._session_history[response_id] = prior + input_messages + output_messages
+        self._session_history[response_id] = messages
 
     @staticmethod
     def _extract_response_id(completed_event: Dict[str, Any]) -> Optional[str]:
@@ -1027,20 +1023,22 @@ class ManagedResponsesWebSocketHandler:
         Pull the raw (decoded) response ID out of a ``response.completed`` event.
         Returns *None* if the event doesn't contain a usable ID.
         """
-        from litellm.responses.utils import ResponsesAPIRequestUtils
-
         resp_obj = completed_event.get("response", {})
-        encoded_id: Optional[str] = resp_obj.get("id") if isinstance(resp_obj, dict) else None
+        encoded_id: Optional[str] = (
+            resp_obj.get("id") if isinstance(resp_obj, dict) else None
+        )
         if not encoded_id:
             return None
         decoded = ResponsesAPIRequestUtils._decode_responses_api_response_id(encoded_id)
         return decoded.get("response_id", encoded_id)
 
     @staticmethod
-    def _extract_output_messages(completed_event: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _extract_output_messages(
+        completed_event: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
         """
         Convert the output items in a ``response.completed`` event into
-        chat-completion style messages suitable for the next turn's ``input``.
+        Responses API message dicts suitable for the next turn's ``input``.
         """
         resp_obj = completed_event.get("response", {})
         if not isinstance(resp_obj, dict):
@@ -1060,7 +1058,13 @@ class ManagedResponsesWebSocketHandler:
                 ]
                 text = "".join(text_parts)
                 if text:
-                    messages.append({"type": "message", "role": role, "content": [{"type": "output_text", "text": text}]})
+                    messages.append(
+                        {
+                            "type": "message",
+                            "role": role,
+                            "content": [{"type": "output_text", "text": text}],
+                        }
+                    )
             elif item_type == "function_call":
                 messages.append(item)
         return messages
@@ -1072,10 +1076,181 @@ class ManagedResponsesWebSocketHandler:
         of Responses API message dicts.
         """
         if isinstance(input_val, str):
-            return [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": input_val}]}]
+            return [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": input_val}],
+                }
+            ]
         if isinstance(input_val, list):
             return [item for item in input_val if isinstance(item, dict)]
         return []
+
+    # ------------------------------------------------------------------
+    # _process_response_create sub-methods
+    # ------------------------------------------------------------------
+
+    async def _parse_message(self, raw_message: str) -> Optional[Dict[str, Any]]:
+        """Parse raw WS text; return the message dict or None (JSON error / ignored type)."""
+        try:
+            msg_obj = json.loads(raw_message)
+        except json.JSONDecodeError:
+            await self._send_error(
+                "Invalid JSON in response.create event", "invalid_request_error"
+            )
+            return None
+        if msg_obj.get("type") != "response.create":
+            # Silently ignore non-response.create messages (e.g. warmup pings)
+            return None
+        return msg_obj
+
+    @staticmethod
+    def _build_base_call_kwargs(msg_obj: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Extract Responses API params from the event, handling both wire formats:
+          Nested: {"type": "response.create", "response": {"input": [...], ...}}
+          Flat:   {"type": "response.create", "input": [...], "model": "...", ...}
+        """
+        nested = msg_obj.get("response")
+        response_params: Dict[str, Any] = (
+            nested
+            if isinstance(nested, dict) and nested
+            else {k: v for k, v in msg_obj.items() if k != "type"}
+        )
+        return {
+            param: response_params[param]
+            for param in _RESPONSE_CREATE_PARAMS
+            if param in response_params and response_params[param] is not None
+        }
+
+    def _apply_history(
+        self,
+        call_kwargs: Dict[str, Any],
+        previous_response_id: Optional[str],
+        current_messages: List[Dict[str, Any]],
+        prior_history: List[Dict[str, Any]],
+    ) -> None:
+        """Prepend in-memory turn history, or fall back to DB-based reconstruction."""
+        if not previous_response_id:
+            return
+        if prior_history:
+            call_kwargs["input"] = prior_history + current_messages
+            verbose_logger.debug(
+                "ManagedResponsesWS: prepended %d history messages for previous_response_id=%s",
+                len(prior_history),
+                previous_response_id,
+            )
+        else:
+            verbose_logger.debug(
+                "ManagedResponsesWS: no in-memory history for previous_response_id=%s; "
+                "falling back to DB-based session reconstruction",
+                previous_response_id,
+            )
+            # Fall back to DB-based session reconstruction (may work for
+            # cross-connection multi-turn when spend logs are committed)
+            call_kwargs["previous_response_id"] = previous_response_id
+
+    def _inject_credentials(
+        self, call_kwargs: Dict[str, Any], event_model: Optional[str]
+    ) -> None:
+        """Inject connection-level credentials and metadata into call_kwargs."""
+        if self.api_key is not None:
+            call_kwargs["api_key"] = self.api_key
+        if self.api_base is not None:
+            call_kwargs["api_base"] = self.api_base
+        if self.timeout is not None:
+            call_kwargs["timeout"] = self.timeout
+        # Only propagate custom_llm_provider when no per-request model override exists.
+        # If the payload specifies a different model, let litellm re-resolve the
+        # provider so we don't accidentally force the wrong backend.
+        if self.custom_llm_provider is not None and not event_model:
+            call_kwargs["custom_llm_provider"] = self.custom_llm_provider
+        if self.litellm_metadata:
+            call_kwargs["litellm_metadata"] = dict(self.litellm_metadata)
+
+    @staticmethod
+    def _update_proxy_request(call_kwargs: Dict[str, Any], model: str) -> None:
+        """Update proxy_server_request body so spend logs record the full request."""
+        proxy_server_request = (call_kwargs.get("litellm_metadata") or {}).get(
+            "proxy_server_request"
+        ) or {}
+        if not isinstance(proxy_server_request, dict):
+            return
+        body = dict(proxy_server_request.get("body") or {})
+        body["input"] = call_kwargs.get("input")
+        body["store"] = call_kwargs.get("store")
+        body["model"] = model
+        for k in ("tools", "tool_choice", "instructions", "metadata"):
+            if k in call_kwargs and call_kwargs[k] is not None:
+                body[k] = call_kwargs[k]
+        proxy_server_request = {**proxy_server_request, "body": body}
+        if "litellm_metadata" not in call_kwargs:
+            call_kwargs["litellm_metadata"] = {}
+        call_kwargs["litellm_metadata"]["proxy_server_request"] = proxy_server_request
+        call_kwargs.setdefault("litellm_params", {})
+        call_kwargs["litellm_params"]["proxy_server_request"] = proxy_server_request
+
+    async def _stream_and_forward(
+        self, model: str, call_kwargs: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Stream ``litellm.aresponses`` and forward every chunk over the WebSocket.
+
+        Captures the ``response.completed`` event type from the chunk object
+        directly (before serialization) to avoid a redundant JSON round-trip on
+        every chunk.  Returns the completed event dict, or ``None``.
+        """
+        completed_event: Optional[Dict[str, Any]] = None
+        stream_response = await litellm.aresponses(model=model, **call_kwargs)
+        async for chunk in stream_response:  # type: ignore[union-attr]
+            if chunk is None:
+                continue
+            # Read type from the object before serializing to avoid double JSON parse
+            chunk_type = getattr(chunk, "type", None) or (
+                chunk.get("type") if isinstance(chunk, dict) else None
+            )
+            serialized = self._serialize_chunk(chunk)
+            if serialized is None:
+                continue
+            if chunk_type == "response.completed" and completed_event is None:
+                try:
+                    completed_event = json.loads(serialized)
+                except Exception:
+                    pass
+            try:
+                await self.websocket.send_text(serialized)
+            except Exception as send_exc:
+                verbose_logger.debug(
+                    "ManagedResponsesWS: error sending chunk to client: %s", send_exc
+                )
+                return completed_event  # Client disconnected
+        return completed_event
+
+    def _save_turn_history(
+        self,
+        completed_event: Optional[Dict[str, Any]],
+        prior_history: List[Dict[str, Any]],
+        current_messages: List[Dict[str, Any]],
+    ) -> None:
+        """Store this turn in in-memory history for future previous_response_id lookups."""
+        if completed_event is None:
+            return
+        new_response_id = self._extract_response_id(completed_event)
+        if not new_response_id:
+            return
+        output_msgs = self._extract_output_messages(completed_event)
+        all_messages = prior_history + current_messages + output_msgs
+        self._store_history(new_response_id, all_messages)
+        verbose_logger.debug(
+            "ManagedResponsesWS: stored %d messages for response_id=%s",
+            len(all_messages),
+            new_response_id,
+        )
+
+    # ------------------------------------------------------------------
+    # Core request handler
+    # ------------------------------------------------------------------
 
     async def _process_response_create(self, raw_message: str) -> None:
         """
@@ -1097,157 +1272,45 @@ class ManagedResponsesWebSocketHandler:
         occurs when spend logs haven't been committed by the time the second
         ``response.create`` arrives over the same WebSocket connection.
         """
-        import litellm as _litellm
-
-        try:
-            msg_obj = json.loads(raw_message)
-        except json.JSONDecodeError:
-            await self._send_error("Invalid JSON in response.create event", "invalid_request_error")
+        msg_obj = await self._parse_message(raw_message)
+        if msg_obj is None:
             return
 
-        if msg_obj.get("type") != "response.create":
-            # Silently ignore non-response.create messages (e.g. warmup pings)
-            return
-
-        # Support two wire formats:
-        #   Nested : {"type": "response.create", "response": {"input": [...], ...}}
-        #   Flat   : {"type": "response.create", "input": [...], "model": "...", ...}
-        nested = msg_obj.get("response")
-        if isinstance(nested, dict) and nested:
-            response_params: Dict[str, Any] = nested
-        else:
-            response_params = {k: v for k, v in msg_obj.items() if k != "type"}
-
-        # Build kwargs for aresponses from the response.create payload
-        call_kwargs: Dict[str, Any] = {}
-        for param in _RESPONSE_CREATE_PARAMS:
-            if param in response_params and response_params[param] is not None:
-                call_kwargs[param] = response_params[param]
-
-        # Always stream
+        call_kwargs = self._build_base_call_kwargs(msg_obj)
         call_kwargs["stream"] = True
 
-        # Use the model from the event if provided, otherwise fall back to the
-        # model supplied at WebSocket connect time.
-        event_model = call_kwargs.pop("model", None)
+        event_model: Optional[str] = call_kwargs.pop("model", None)
         model = event_model or self.model
 
-        # ---- In-memory multi-turn: prepend history when previous_response_id set ----
-        previous_response_id: Optional[str] = call_kwargs.pop("previous_response_id", None)
-        current_input = call_kwargs.get("input")
-        current_messages = self._input_to_messages(current_input)
-        if previous_response_id:
-            history = self._get_history_messages(previous_response_id)
-            if history:
-                # Prepend history; current messages are the new user turn
-                call_kwargs["input"] = history + current_messages
-                verbose_logger.debug(
-                    "ManagedResponsesWS: prepended %d history messages for previous_response_id=%s",
-                    len(history),
-                    previous_response_id,
-                )
-            else:
-                verbose_logger.debug(
-                    "ManagedResponsesWS: no in-memory history for previous_response_id=%s; "
-                    "falling back to DB-based session reconstruction",
-                    previous_response_id,
-                )
-                # Fall back to DB-based session reconstruction (may work for
-                # cross-connection multi-turn when spend logs are committed)
-                call_kwargs["previous_response_id"] = previous_response_id
-        # ---------------------------------------------------------------------------
+        previous_response_id: Optional[str] = call_kwargs.pop(
+            "previous_response_id", None
+        )
+        current_messages = self._input_to_messages(call_kwargs.get("input"))
 
-        # Inject connection-level credentials and metadata.
-        # Only propagate custom_llm_provider when the request is using the
-        # same model as the WebSocket connection (i.e. no per-request model
-        # override).  If the payload specifies a different model, let litellm
-        # re-resolve the provider from the model name so we don't accidentally
-        # force the wrong backend.
-        if self.api_key is not None:
-            call_kwargs["api_key"] = self.api_key
-        if self.api_base is not None:
-            call_kwargs["api_base"] = self.api_base
-        if self.timeout is not None:
-            call_kwargs["timeout"] = self.timeout
-        if self.custom_llm_provider is not None and not event_model:
-            call_kwargs["custom_llm_provider"] = self.custom_llm_provider
-        if self.litellm_metadata:
-            call_kwargs["litellm_metadata"] = dict(self.litellm_metadata)
+        # Fetch history once; reused in both _apply_history and _save_turn_history
+        prior_history = (
+            self._get_history_messages(previous_response_id)
+            if previous_response_id
+            else []
+        )
 
-        # Update proxy_server_request body so spend logs record the full request.
-        proxy_server_request = (call_kwargs.get("litellm_metadata") or {}).get(
-            "proxy_server_request"
-        ) or {}
-        if isinstance(proxy_server_request, dict):
-            body = dict(proxy_server_request.get("body") or {})
-            body["input"] = call_kwargs.get("input")
-            body["store"] = call_kwargs.get("store")
-            body["model"] = model
-            for k in ("tools", "tool_choice", "instructions", "metadata"):
-                if k in call_kwargs and call_kwargs[k] is not None:
-                    body[k] = call_kwargs[k]
-            proxy_server_request = dict(proxy_server_request)
-            proxy_server_request["body"] = body
-            if "litellm_metadata" not in call_kwargs:
-                call_kwargs["litellm_metadata"] = {}
-            call_kwargs["litellm_metadata"]["proxy_server_request"] = proxy_server_request
-            call_kwargs.setdefault("litellm_params", {})
-            call_kwargs["litellm_params"]["proxy_server_request"] = proxy_server_request
-
-        # Merge any safe pass-through kwargs (extra_headers, etc.)
+        self._apply_history(
+            call_kwargs, previous_response_id, current_messages, prior_history
+        )
+        self._inject_credentials(call_kwargs, event_model)
+        self._update_proxy_request(call_kwargs, model)
         call_kwargs.update(self.extra_kwargs)
 
-        # Track the completed event to update in-memory history after the turn.
-        completed_event: Optional[Dict[str, Any]] = None
-
         try:
-            stream_response = await _litellm.aresponses(model=model, **call_kwargs)
-
-            async for chunk in stream_response:  # type: ignore[union-attr]
-                if chunk is None:
-                    continue
-                serialized = self._serialize_chunk(chunk)
-                if serialized is not None:
-                    # Capture the completed event for history bookkeeping
-                    try:
-                        chunk_dict = json.loads(serialized) if isinstance(serialized, str) else {}
-                        if chunk_dict.get("type") == "response.completed":
-                            completed_event = chunk_dict
-                    except Exception:
-                        pass
-                    try:
-                        await self.websocket.send_text(serialized)
-                    except Exception as send_exc:
-                        verbose_logger.debug(
-                            "ManagedResponsesWS: error sending chunk to client: %s", send_exc
-                        )
-                        return  # Client disconnected
-
+            completed_event = await self._stream_and_forward(model, call_kwargs)
         except Exception as exc:
-            verbose_logger.exception("ManagedResponsesWS: error processing response.create: %s", exc)
+            verbose_logger.exception(
+                "ManagedResponsesWS: error processing response.create: %s", exc
+            )
             await self._send_error(str(exc))
             return
 
-        # ---- Store this turn in in-memory history for future previous_response_id lookups ----
-        if completed_event is not None:
-            new_response_id = self._extract_response_id(completed_event)
-            if new_response_id:
-                output_msgs = self._extract_output_messages(completed_event)
-                # Accumulate: history from previous turn + current input + new output
-                prior_history: List[Dict[str, Any]] = []
-                if previous_response_id:
-                    prior_history = self._get_history_messages(previous_response_id)
-                self._store_history(
-                    new_response_id,
-                    prior_history + current_messages,
-                    output_msgs,
-                )
-                verbose_logger.debug(
-                    "ManagedResponsesWS: stored %d messages for response_id=%s",
-                    len(prior_history) + len(current_messages) + len(output_msgs),
-                    new_response_id,
-                )
-        # ---------------------------------------------------------------------------
+        self._save_turn_history(completed_event, prior_history, current_messages)
 
     # ------------------------------------------------------------------
     # Main entry point
