@@ -8,7 +8,6 @@ from fastapi import APIRouter, Depends, Request, Response, UploadFile
 from fastapi.responses import ORJSONResponse
 
 from litellm._logging import verbose_proxy_logger
-from litellm.ocr.main import convert_file_document_to_url_document, get_mime_type
 from litellm.proxy._types import *
 from litellm.proxy.auth.user_api_key_auth import UserAPIKeyAuth, user_api_key_auth
 from litellm.proxy.common_request_processing import ProxyBaseLLMRequestProcessing
@@ -27,6 +26,8 @@ def _build_document_from_upload(
     Delegates to convert_file_document_to_url_document after resolving MIME type
     from the upload's content_type header or filename.
     """
+    from litellm.ocr.main import convert_file_document_to_url_document, get_mime_type
+
     mime_type = content_type.split(";")[0].strip() if content_type else None
     if not mime_type or mime_type == "application/octet-stream":
         if filename:
@@ -177,6 +178,24 @@ async def _parse_ocr_request(request: Request) -> Dict[str, Any]:
             "To upload a local file, use multipart/form-data with a 'file' field. "
             "For JSON requests, use 'document_url' or 'image_url' document types."
         )
+
+    # Security: reject provider-native file IDs (e.g. reducto://) received via
+    # JSON. These IDs are not scoped to the LiteLLM proxy user/key, so an
+    # authenticated user who obtains another user's file ID could submit it
+    # here and receive the OCR result using the proxy's shared provider
+    # credentials. Force callers to upload fresh content per request via
+    # multipart/form-data or an inline base64 data URI, both of which produce
+    # a server-mediated upload bound to the current request.
+    if isinstance(doc, dict):
+        for url_field in ("document_url", "image_url"):
+            url_value = doc.get(url_field)
+            if isinstance(url_value, str) and url_value.startswith("reducto://"):
+                raise ValueError(
+                    "reducto:// file IDs are not accepted through the proxy "
+                    "OCR API; upload the file in the same request via "
+                    "multipart/form-data with a 'file' field, or pass an "
+                    "inline base64 data URI as the document URL."
+                )
 
     return data
 

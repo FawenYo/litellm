@@ -54,6 +54,7 @@ class OCRUsageInfo(LiteLLMPydanticObjectBase):
     """Usage information from OCR response."""
 
     pages_processed: Optional[int] = None
+    credits: Optional[float] = None
     doc_size_bytes: Optional[int] = None
 
     model_config = {"extra": "allow"}
@@ -99,6 +100,12 @@ class BaseOCRConfig:
         Override this method in provider-specific implementations.
         """
         return []
+
+    def get_api_key_env_var(self) -> Optional[str]:
+        """
+        Return the provider-specific API key environment variable name, if any.
+        """
+        return None
 
     def map_ocr_params(
         self,

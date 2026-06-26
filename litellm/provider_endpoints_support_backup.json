@@ -31,6 +31,11 @@
       }
     }
   },
+  "default_creds": {
+    "mistral": {
+      "default_api_base": "https://api.mistral.ai/v1"
+    }
+  },
   "providers": {
     "a2a": {
       "display_name": "A2A (Agent-to-Agent) (`a2a`)",
@@ -179,6 +184,7 @@
     },
     "apertis": {
       "display_name": "Apertis (`apertis`)",
+      "url": "https://docs.litellm.ai/docs/providers/apertis",
       "endpoints": {
         "chat_completions": true,
         "messages": false,
@@ -460,6 +466,7 @@
     },
     "chutes": {
       "display_name": "Chutes (`chutes`)",
+      "url": "https://docs.litellm.ai/docs/providers/chutes",
       "endpoints": {
         "chat_completions": true,
         "messages": false,
@@ -1288,6 +1295,23 @@
         "interactions": true
       }
     },
+    "libertai": {
+      "display_name": "LibertAI (`libertai`)",
+      "url": "https://docs.litellm.ai/docs/providers/libertai",
+      "endpoints": {
+        "chat_completions": true,
+        "messages": true,
+        "responses": false,
+        "embeddings": false,
+        "image_generations": false,
+        "audio_transcriptions": false,
+        "audio_speech": false,
+        "moderations": false,
+        "batches": false,
+        "rerank": false,
+        "a2a": false
+      }
+    },
     "litellm_proxy": {
       "display_name": "LiteLLM Proxy (`litellm_proxy`)",
       "url": "https://docs.litellm.ai/docs/providers/litellm_proxy",
@@ -1453,6 +1477,7 @@
     },
     "nanogpt": {
       "display_name": "NanoGPT (`nanogpt`)",
+      "url": "https://docs.litellm.ai/docs/providers/nanogpt",
       "endpoints": {
         "chat_completions": true,
         "messages": false,
@@ -1537,6 +1562,23 @@
         "rerank": false,
         "a2a": true,
         "interactions": true
+      }
+    },
+    "neosantara": {
+      "display_name": "Neosantara (`neosantara`)",
+      "url": "https://docs.litellm.ai/docs/providers/neosantara",
+      "endpoints": {
+        "chat_completions": true,
+        "messages": false,
+        "responses": true,
+        "embeddings": false,
+        "image_generations": false,
+        "audio_transcriptions": false,
+        "audio_speech": false,
+        "moderations": false,
+        "batches": false,
+        "rerank": false,
+        "a2a": false
       }
     },
     "nvidia_nim": {
@@ -1769,6 +1811,7 @@
     },
     "poe": {
       "display_name": "Poe (`poe`)",
+      "url": "https://docs.litellm.ai/docs/providers/poe",
       "endpoints": {
         "chat_completions": true,
         "messages": false,
@@ -1799,6 +1842,23 @@
         "rerank": false,
         "a2a": true,
         "interactions": true
+      }
+    },
+    "darkbloom": {
+      "display_name": "Darkbloom (`darkbloom`)",
+      "url": "https://docs.litellm.ai/docs/providers/darkbloom",
+      "endpoints": {
+        "chat_completions": true,
+        "messages": false,
+        "responses": false,
+        "embeddings": false,
+        "image_generations": false,
+        "audio_transcriptions": false,
+        "audio_speech": false,
+        "moderations": false,
+        "batches": false,
+        "rerank": false,
+        "a2a": false
       }
     },
     "predibase": {
@@ -1979,6 +2039,7 @@
     },
     "synthetic": {
       "display_name": "Synthetic (`synthetic`)",
+      "url": "https://docs.litellm.ai/docs/providers/synthetic",
       "endpoints": {
         "chat_completions": true,
         "messages": true,
