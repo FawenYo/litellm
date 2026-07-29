@@ -2,27 +2,56 @@
 
 This file defines the rules for Rust work in LiteLLM.
 
+## Provider Coding Standards
+
+Before writing new logic, look for an existing base to extend. When a change is
+“the same behavior for one more provider/endpoint/integration”, the codebase
+almost always already has a shared abstraction for it (for example, provider
+`BaseConfig` transformation classes in `litellm/llms/base_llm/`, shared
+helpers in `litellm_core_utils/`, typed request/response models, or factory
+functions). Find it first with a search, then add the new variant by inheriting
+from or composing that base, overriding only what genuinely differs (model
+name, parameter mapping, or auth).
+
+Never copy an existing implementation and edit it in place, and never hand-roll
+a parallel version of logic a base already provides. If you catch yourself
+writing a second copy of a pattern that exists twice already, stop and extract a
+base instead: put the shared shape in one place and make both call sites thin
+variants of it. The test for a good abstraction is that adding the next provider
+is a few declarative lines, not a new file of duplicated flow. Only diverge from
+the base when behavior is genuinely different, and say so explicitly in the PR.
+
+## Crates (exactly three — see AGENTS.md)
+
+`litellm-core` describes work; `litellm-ai-gateway` executes it; `litellm-python-bridge`
+exposes it to the Python SDK. A crate is a **layer**, not a route — add modules, not crates.
+
 ## Core Boundary
 
-The `core` and `providers` crates describe work; hosts execute work.
+`litellm-core` is the pure translation layer; the `litellm-ai-gateway` host executes work.
 
 Route-level Rust structure mirrors LiteLLM's Python responsibilities:
 - `core/src/<route>/` owns the route contract, shared types, and provider
   template traits. For OCR, this means `core/src/ocr`.
-- `providers/src/<provider>/<route>/transformation.rs` owns the
+- `core/src/providers/<provider>/<route>/transformation.rs` owns the
   provider-specific transform. For Mistral OCR, this means
-  `providers/src/mistral/ocr/transformation.rs`.
-- Future network execution belongs in a host/transport layer such as
-  `llm_http_handler`, not inside `core` or `providers`.
+  `core/src/providers/mistral/ocr/transformation.rs`.
+- Network execution lives in the host crate `ai-gateway` (`ai-gateway/src/io/`),
+  never inside `core`.
 
-Allowed in `core` and `providers`:
+Call-hook and lifecycle instrumentation, including phase timing, usage
+accumulation, and callback payload construction, always lives in `core`.
+Hosts feed observed events into core and dispatch the completed payloads through
+their I/O logger; hosts must not own callback orchestration.
+
+Allowed in `core`:
 - Pure request transforms
 - Pure response transforms
 - Pure stream chunk normalization
 - Shared data types and validation errors
 - Deterministic token/cost helper logic
 
-Not allowed in `core` or `providers`:
+Not allowed in `core`:
 - Network calls
 - Environment variable or secret reads
 - Filesystem access
@@ -33,6 +62,13 @@ Not allowed in `core` or `providers`:
 
 Python owns rollout state and fallback while Rust is being introduced. Rust
 paths must be off by default until parity tests prove equivalence with Python.
+A new provider/route may instead be implemented rust-only with no Python
+reference; then the Python interface is a thin dispatch that calls Rust with no
+fallback, and you state the rust-only choice explicitly in the PR. Either way
+the Python side stays minimal (it only marshals inputs and calls the Rust
+interface), never add a per-route feature flag, and never push provider
+dispatch into `litellm/main.py`; put it in a thin dispatch class under
+`litellm/llms/<provider>/<route>/`.
 
 ## Production Bar
 
@@ -72,6 +108,40 @@ such as `ai-gateway`, router hosts, or standalone servers:
 - Avoid `expect`/`unwrap` in server startup and request paths unless the panic is
   impossible by construction and documented.
 
+## Rust Style Guide
+
+All Rust in `litellm-rust/` follows the official Rust Style Guide:
+https://doc.rust-lang.org/style-guide/
+
+`rustfmt` implements the guide's formatting rules by default, so the mechanical
+side is enforced for you: run `cargo fmt` before committing and CI gates every
+PR on `cargo fmt --check` (see Checks). Do not hand-format against rustfmt or add
+a `rustfmt.toml` that diverges from the default style; the default style *is* the
+guide.
+
+The guide also covers conventions rustfmt cannot auto-apply; follow these too:
+- Naming: `snake_case` for items, functions, and modules; `UpperCamelCase` for
+  types, traits, and enum variants; `SCREAMING_SNAKE_CASE` for constants and
+  statics; acronyms count as one word (`HttpClient`, not `HTTPClient`).
+- Ordering and grouping the guide prescribes: imports grouped std / external /
+  crate-local, derives before other attributes, and consistent item order.
+- Idioms the guide recommends over the formatter fighting you (e.g. prefer
+  restructuring an over-long expression rather than forcing an awkward wrap).
+
+## Constants
+
+Magic numbers and fixed strings go in a crate-level `constants.rs`, never
+hardcoded inline — the Rust mirror of Python's `litellm/constants.py`.
+
+- Each crate that needs them has `src/constants.rs` (declared `mod constants;`);
+  import from it (`use crate::constants::...`). Don't scatter `const` values at
+  the top of feature modules.
+- An env-overridable tunable still lives in `constants.rs` as its `DEFAULT_*`
+  value; the env read (with fallback to that default) happens at the host/config
+  resolution layer, not in `core`/`providers`.
+- Exception: a value that is purely local to one function and has no meaning
+  elsewhere may stay inline, but prefer `constants.rs` when in doubt.
+
 ## Checks
 
 Run these before pushing Rust changes. The same checks run in GitHub Actions
@@ -80,7 +150,9 @@ for changes under `litellm-rust/`.
 ```bash
 cd litellm-rust
 cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
+# the ai-gateway binary + server code is behind the `server` feature
+cargo clippy -p litellm-ai-gateway --all-targets --features server -- -D warnings
+cargo clippy -p litellm-core -p litellm-python-bridge --all-targets -- -D warnings
 cargo test --workspace
 ```
 
