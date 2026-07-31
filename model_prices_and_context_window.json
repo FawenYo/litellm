@@ -20953,6 +20953,8 @@
     "github_copilot/claude-opus-4.6": {
         "supports_adaptive_thinking": true,
         "litellm_provider": "github_copilot",
+        "input_cost_per_token": 5e-6,
+        "output_cost_per_token": 2.5e-5,
         "max_input_tokens": 128000,
         "max_output_tokens": 16000,
         "max_tokens": 16000,
@@ -20967,6 +20969,8 @@
     "github_copilot/claude-opus-4.7": {
         "supports_adaptive_thinking": true,
         "litellm_provider": "github_copilot",
+        "input_cost_per_token": 5e-6,
+        "output_cost_per_token": 2.5e-5,
         "max_input_tokens": 128000,
         "max_output_tokens": 16000,
         "max_tokens": 16000,
@@ -20981,6 +20985,8 @@
     "github_copilot/claude-opus-4.8": {
         "supports_adaptive_thinking": true,
         "litellm_provider": "github_copilot",
+        "input_cost_per_token": 5e-6,
+        "output_cost_per_token": 2.5e-5,
         "max_input_tokens": 128000,
         "max_output_tokens": 16000,
         "max_tokens": 16000,
@@ -20995,6 +21001,8 @@
     "github_copilot/claude-opus-5": {
         "supports_adaptive_thinking": true,
         "litellm_provider": "github_copilot",
+        "input_cost_per_token": 5e-6,
+        "output_cost_per_token": 2.5e-5,
         "max_input_tokens": 128000,
         "max_output_tokens": 16000,
         "max_tokens": 16000,
@@ -21009,6 +21017,8 @@
     "github_copilot/claude-fable-5": {
         "supports_adaptive_thinking": true,
         "litellm_provider": "github_copilot",
+        "input_cost_per_token": 1e-5,
+        "output_cost_per_token": 5e-5,
         "max_input_tokens": 128000,
         "max_output_tokens": 16000,
         "max_tokens": 16000,
@@ -21022,6 +21032,8 @@
     },
     "github_copilot/claude-sonnet-4.5": {
         "litellm_provider": "github_copilot",
+        "input_cost_per_token": 3e-6,
+        "output_cost_per_token": 1.5e-5,
         "max_input_tokens": 128000,
         "max_output_tokens": 16000,
         "max_tokens": 16000,
@@ -21035,6 +21047,8 @@
     },
     "github_copilot/claude-sonnet-4.6": {
         "litellm_provider": "github_copilot",
+        "input_cost_per_token": 3e-6,
+        "output_cost_per_token": 1.5e-5,
         "max_input_tokens": 128000,
         "max_output_tokens": 16000,
         "max_tokens": 16000,
@@ -21049,6 +21063,8 @@
     },
     "github_copilot/claude-sonnet-5": {
         "litellm_provider": "github_copilot",
+        "input_cost_per_token": 2e-6,
+        "output_cost_per_token": 1e-5,
         "max_input_tokens": 128000,
         "max_output_tokens": 16000,
         "max_tokens": 16000,
@@ -21063,6 +21079,8 @@
     },
     "github_copilot/gemini-3.1-pro-preview": {
         "litellm_provider": "github_copilot",
+        "input_cost_per_token": 2e-6,
+        "output_cost_per_token": 1.2e-5,
         "max_input_tokens": 128000,
         "max_output_tokens": 64000,
         "max_tokens": 64000,
@@ -21073,6 +21091,8 @@
     },
     "github_copilot/gpt-5.3-codex": {
         "litellm_provider": "github_copilot",
+        "input_cost_per_token": 1.75e-6,
+        "output_cost_per_token": 1.4e-5,
         "max_input_tokens": 128000,
         "max_output_tokens": 128000,
         "max_tokens": 128000,
@@ -21091,8 +21111,8 @@
         "max_output_tokens": 128000,
         "max_tokens": 128000,
         "mode": "responses",
-        "input_cost_per_token": 0.000001,
-        "output_cost_per_token": 0.000006,
+        "input_cost_per_token": 1.2e-7,
+        "output_cost_per_token": 1.2e-6,
         "supported_endpoints": [
             "/v1/responses"
         ],
@@ -21107,8 +21127,8 @@
         "max_output_tokens": 128000,
         "max_tokens": 128000,
         "mode": "responses",
-        "input_cost_per_token": 0.0000025,
-        "output_cost_per_token": 0.000015,
+        "input_cost_per_token": 2e-6,
+        "output_cost_per_token": 1.2e-5,
         "supported_endpoints": [
             "/v1/responses"
         ],
@@ -21123,8 +21143,8 @@
         "max_output_tokens": 128000,
         "max_tokens": 128000,
         "mode": "responses",
-        "input_cost_per_token": 0.000005,
-        "output_cost_per_token": 0.000015,
+        "input_cost_per_token": 5e-6,
+        "output_cost_per_token": 3e-5,
         "supported_endpoints": [
             "/v1/responses"
         ],
